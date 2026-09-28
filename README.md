@@ -14,7 +14,7 @@ The two sides talk to each other through **Arduino_RouterBridge**.
 ## Hardware
 
 - Arduino UNO Q
-- Arduino Media Carrier with a USB camera attached
+- Arduino Media Carrier with a camera attached (CSI or USB)
 - Arduino Modulino Buttons
 - SH1107 OLED display, I2C, address `0x3C` (128×64 or 128×128)
 
@@ -38,35 +38,35 @@ On power-up the display draws an animated **S** logo, then shows the main screen
 | **A** | Switch to the next style (wraps around) |
 | **C** | Take a picture |
 
-When the roll reaches 0, the shutter button displays `Roll empty` and no picture is taken.
+Each start of the camera loads a new, empty roll of 24 pictures. When the roll reaches 0, the shutter button displays `Roll empty` and no picture is taken. Restart the camera to start a new roll.
 
 ## Project layout
 
 ```
-style-camera/
+camera_q8/
 ├── app.yaml
 ├── README.md
 ├── sketch/
-│   └── sketch.ino          MCU firmware
+│   └── sketch.ino              MCU firmware
 ├── python/
-│   ├── main.py             Linux application
-│   └── requirements.txt
-├── models/                 One ONNX model per style
-└── data/
-    └── pictures/           Captured and stylised pictures
+│   ├── main.py                 Application entry point and Bridge handlers
+│   ├── snapshot_store.py       SnapshotStore: rolls of 24 pictures
+│   └── models/                 Style-transfer models
+├── snapshots/                  Created at first start
+│   ├── roll_0001/
+│   │   ├── pic_01.jpg
+│   │   └── ...
+│   └── roll_0002/
+└── tests/
+    └── firmware_test.py        Interactive Bridge and firmware test
 ```
 
 ## Installation
 
-1. Open **Arduino App Lab** and import the `style-camera` folder.
-2. In the sketch library manager, make sure these libraries are installed:
-   - `Arduino_RouterBridge`
-   - `Arduino_Modulino`
-   - `Adafruit SH110X`
-   - `Adafruit GFX Library`
-3. If your OLED is a 128×128 module, set `OLED_HEIGHT` to `128` at the top of `sketch.ino`.
-4. Place the style models in `models/` (see [Style models](#style-models)).
-5. Press **Run**. App Lab compiles and flashes the sketch, then starts the Python application.
+1. Open **Arduino App Lab** and import the `/camera_q8` folder under `/home/ArduinoApps/`.
+2. If your OLED is a 128×128 module, set `OLED_HEIGHT` to `128` at the top of `sketch.ino`.
+3. Place the style models in `python/models/`.
+4. Press **Run**. App Lab compiles and flashes the sketch, then starts the Python application.
 
 ## How it works
 
@@ -107,33 +107,19 @@ Methods provided by the MCU:
 
 ### Linux application
 
-The Python application registers the methods above and reacts to the notifications:
+`main.py` registers the Bridge methods above and ties three components together.
 
-```python
-from arduino.app_utils import App, Bridge
+**Camera** (`arduino.app_peripherals.camera`) is the platform camera object. It is started once at launch with a 640×480 resolution and uses the first camera found, USB before CSI. A frame is grabbed with `capture()` each time the shutter button is pressed. The resolution is set by `CAMERA_RESOLUTION` in `main.py`.
 
-Bridge.provide("get_styles", get_styles)
-Bridge.provide("get_remaining_pics", get_remaining_pics)
-Bridge.provide("take_picture", on_take_picture)
-Bridge.provide("style_changed", on_style_changed)
+**SnapshotStore** (`snapshot_store.py`) keeps the pictures in numbered rolls under `snapshots/`. Every roll holds at most 24 pictures, saved as JPEG and named `pic_01.jpg` to `pic_24.jpg`. At start, the application opens a new roll (`roll_0001`, `roll_0002`, ...), reusing the latest one only if it is still empty. Once the roll is full no more pictures are accepted until the camera is restarted.
 
-App.run()
-```
+**StyleSelector** (`main.py`) tracks the style currently selected on the device. It is updated on every `style_changed` notification.
 
-On `take_picture` the application:
-
-1. Grabs a frame from the USB camera on the Media Carrier through OpenCV (`/dev/video*`).
-2. Runs the frame through the model of the currently selected style.
-3. Saves the original and the stylised result to `data/pictures/`.
-4. Calls `set_remaining_pics` with the new count.
-
-On `style_changed` it selects the model at the given index. Styles are discovered by scanning `models/`: every `*.onnx` file is one style and its file name (without extension) is the name shown on the display.
-
-Style transfer is performed with [ONNX Runtime](https://onnxruntime.ai/) on the CPU. Frames are resized to the model's input size before inference, so a stylised picture is ready within a few seconds.
+When `take_picture` arrives, the application grabs a frame, saves it to the current roll, applies the selected style, and calls `set_remaining_pics` to refresh the display. Presses received while a picture is being processed are ignored.
 
 ### Style models
 
-The application works with any fast feed-forward style-transfer network exported to ONNX. The open-source *Fast Neural Style Transfer* models from the ONNX Model Zoo are a good starting point:
+Style transfer is performed on the CPU with [ONNX Runtime](https://onnxruntime.ai/), using fast feed-forward style-transfer networks exported to ONNX. The open-source *Fast Neural Style Transfer* models from the ONNX Model Zoo are a good starting point:
 
 - `candy.onnx`
 - `mosaic.onnx`
@@ -141,11 +127,11 @@ The application works with any fast feed-forward style-transfer network exported
 - `rain_princess.onnx`
 - `udnie.onnx`
 
-Copy them into `models/`. Keep names short: names up to 10 characters are displayed in large text, longer names in small text, and anything beyond 21 characters is truncated. A maximum of 16 styles is supported.
+Keep style names short: names up to 10 characters are displayed in large text, longer names in small text, and anything beyond 21 characters is truncated. A maximum of 16 styles is supported.
 
-### Roll management
+## Testing
 
-The roll holds 24 pictures. The remaining count is `24 − number of pictures in data/pictures/`, so the roll is reloaded by moving or deleting the saved pictures and restarting the app.
+`tests/firmware_test.py` exercises every firmware function through the Bridge: the startup handshake, both buttons, the shutter lockout, and `set_remaining_pics`, including the display of an empty roll. To run it, copy it over `python/main.py`, press **Run** in App Lab and follow the prompts in the console.
 
 ## Troubleshooting
 
@@ -154,5 +140,5 @@ The roll holds 24 pictures. The remaining count is `24 − number of pictures in
 | Display stays on `Waiting for Linux...` | The Python application is not running or failed to start. Check the App Lab console. |
 | Display stays blank | Verify the OLED address (`0x3C`) and the `OLED_HEIGHT` setting. |
 | Buttons do nothing | Check the Qwiic cable and that the Modulino is detected on `Wire1`. |
-| Picture is not taken | Verify the camera appears as `/dev/video0` on the Linux side. |
-| No styles found | Make sure `models/` contains at least one `.onnx` file. |
+| `Camera unavailable` in the console | No camera was found. Check the USB or CSI connection to the Media Carrier. |
+| `Picture failed` in the console | The camera returned no frame or the roll folder is not writable. |
