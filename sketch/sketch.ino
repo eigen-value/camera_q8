@@ -53,6 +53,8 @@ volatile bool redrawRequested = false;
 
 bool     stylePrev   = false;
 bool     shutterPrev = false;
+bool     linuxBusy   = false;
+unsigned long     startProgress = 0;
 uint32_t lastShutter = 0;
 
 // ---------------------------------------------------------------- Display helpers
@@ -115,15 +117,30 @@ void drawStatus() {
   display.setCursor(x + remW, yo + 2 + 32 - 16);   // bottom-aligned with big digits
   display.print(tot);
 
-  String name = styleCount > 0 ? styleNames[styleIndex] : String("no style");
-  const uint8_t size = name.length() <= 10 ? 2 : 1;
-  const size_t maxChars = display.width() / (6 * size);
-  if (name.length() > maxChars) name = name.substring(0, maxChars);
-  const int nameW = name.length() * 6 * size;
+  if (linuxBusy) {
+    // draw a fake progress bar that reaches 99% after one minute
+    int perc = ((millis() - startProgress) * 100) / 60000;
+    if (perc >= 99) perc = 99;
 
-  display.setTextSize(size);
-  display.setCursor((display.width() - nameW) / 2, yo + (size == 2 ? 44 : 48));
-  display.print(name);
+    // Draw outline
+    display.drawRect(x, 44, remW + totW, 20, SH110X_WHITE);
+
+    // Fill bar
+    int fillWidth = (perc * (remW + totW - 4)) / 100; // inside width
+    display.fillRect(x+2, 46, fillWidth, 16, SH110X_WHITE);
+    redrawRequested = true;  // keep drawing
+
+  } else {
+    String name = styleCount > 0 ? styleNames[styleIndex] : String("no style");
+    const uint8_t size = name.length() <= 10 ? 2 : 1;
+    const size_t maxChars = display.width() / (6 * size);
+    if (name.length() > maxChars) name = name.substring(0, maxChars);
+    const int nameW = name.length() * 6 * size;
+
+    display.setTextSize(size);
+    display.setCursor((display.width() - nameW) / 2, yo + (size == 2 ? 44 : 48));
+    display.print(name);
+  }
 
   display.display();
 }
@@ -133,6 +150,12 @@ int setRemainingPics(int value) {
   remaining = constrain(value, 0, TOTAL_PICS);
   redrawRequested = true;
   return remaining;
+}
+
+void setLinuxBusy(bool value) {
+  linuxBusy = value;
+  redrawRequested = value;
+  startProgress = millis();
 }
 
 // ---------------------------------------------------------------- Bridge: MCU -> Linux
@@ -169,6 +192,7 @@ void syncWithLinux() {
 // ---------------------------------------------------------------- Buttons
 void nextStyle() {
   if (styleCount == 0) return;
+  if (linuxBusy) return;
   styleIndex = (styleIndex + 1) % styleCount;
   Bridge.notify("style_changed", (int)styleIndex, styleNames[styleIndex]);
   redrawRequested = true;
@@ -184,6 +208,13 @@ void shutter() {
     redrawRequested = true;
     return;
   }
+
+  if (linuxBusy) {
+    showMessage("Developing the image");
+    delay(800);
+    redrawRequested = true;
+    return;}
+
   Bridge.notify("take_picture");
 }
 
@@ -204,6 +235,7 @@ void pollButtons() {
 void setup() {
   Bridge.begin();
   Bridge.provide_safe("set_remaining_pics", setRemainingPics);
+  Bridge.provide_safe("linux_busy", setLinuxBusy);
 
   Modulino.begin(I2C_BUS);
   buttons.begin();

@@ -8,12 +8,13 @@ from arduino.app_peripherals.camera import Camera
 from arduino.app_utils import App, Bridge
 
 from snapshot_store import RollFullError, SnapshotStore
+from style_transfer import StyleTransfer, ensure_models, MODELS
 
 APP_DIR = Path(__file__).resolve().parent.parent
 SNAPSHOT_ROOT = APP_DIR / "snapshots"
 TOTAL_PICS = 24
 CAMERA_RESOLUTION = (640, 480)
-STYLE_NAMES = ["candy", "mosaic", "pointilism", "rain_princess", "udnie"]
+STYLE_NAMES = MODELS.keys()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,6 +23,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("main")
 
+ensure_models()
+styler = StyleTransfer(input_size=512)
 
 class StyleSelector:
     """Tracks the style currently selected on the device."""
@@ -45,17 +48,16 @@ class StyleSelector:
                 log.warning("Ignoring out-of-range style index %s", index)
                 return False
             if name is not None and name != self.names[index]:
-                log.warning("Style %d is %r here but %r on the device", index, self.names[index], name)
+                log.warning("Style %d is %r here but %r on the device",
+                            index, self.names[index], name)
             self._index = index
             return True
-
 
 store = SnapshotStore(SNAPSHOT_ROOT, TOTAL_PICS)
 styles = StyleSelector(STYLE_NAMES)
 
 shutter_event = threading.Event()
 _display_synced = False
-
 
 # ------------------------------------------------------------ Camera
 def start_camera():
@@ -67,35 +69,28 @@ def start_camera():
         log.error("Camera unavailable: %s", exc)
         return None
 
-
 camera = start_camera()
-
 
 # ------------------------------------------------------------ Bridge: MCU -> Linux
 def get_styles():
     log.info("Style list requested")
     return "|".join(styles.names)
 
-
 def get_remaining_pics():
     log.info("Remaining pictures requested (%d)", store.remaining)
     return store.remaining
 
-
 def take_picture():
     shutter_event.set()
-
 
 def style_changed(index, name):
     if styles.select(index, name):
         log.info("Style: %s", styles.name)
 
-
 Bridge.provide("get_styles", get_styles)
 Bridge.provide("get_remaining_pics", get_remaining_pics)
 Bridge.provide("take_picture", take_picture)
 Bridge.provide("style_changed", style_changed)
-
 
 # ------------------------------------------------------------ Linux -> MCU
 def push_remaining():
@@ -104,11 +99,11 @@ def push_remaining():
     except Exception as exc:
         log.warning("Could not update the display: %s", exc)
 
-
 # ------------------------------------------------------------ Shutter
 def handle_shutter():
     if store.is_full:
-        log.warning("Roll %s is full, restart the camera for a new roll", store.roll_dir.name)
+        log.warning("Roll %s is full, restart the camera for a new roll",
+                    store.roll_dir.name)
         push_remaining()
         return
 
@@ -121,15 +116,19 @@ def handle_shutter():
         frame = camera.capture()
         if frame is None:
             raise RuntimeError("camera returned no frame")
-        path = store.save(frame)
+
+        Bridge.call("linux_busy", True)
+        styled = styler.apply(frame, style)
+
+        path = store.save(frame, styled)
     except (RollFullError, OSError, RuntimeError) as exc:
         log.error("Picture failed: %s", exc)
         return
+    finally:
+        Bridge.call("linux_busy", False)
 
     log.info("Saved %s (style: %s, %d left)", path.name, style, store.remaining)
-    # Style transfer for `path` with `style` is applied here.
     push_remaining()
-
 
 def user_loop():
     global _display_synced
@@ -143,7 +142,6 @@ def user_loop():
         handle_shutter()
     finally:
         shutter_event.clear()
-
 
 try:
     App.run(user_loop=user_loop)
